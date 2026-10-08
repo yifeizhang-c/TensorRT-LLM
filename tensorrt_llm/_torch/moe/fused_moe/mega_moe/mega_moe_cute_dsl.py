@@ -518,14 +518,16 @@ class TrtllmCutedslMegaMoeNvfp4Impl(MoEImplBase):
                 f"divisible by ep_size ({d.ep_size}).",
             )
         # The fused kernel returns a globally combined routed output. MiniMax-M3
-        # accounts for that when composing routed and shared experts; the other
-        # current model wrappers would apply a second AllReduce under TEP.
-        if d.parallel_size > 1 and not d.use_dp and not is_minimax_swiglu_bias:
+        # and Kimi K3 both compose routed and shared experts without reducing
+        # that output again (Kimi skips it when scheduler_kind is FUSED_COMM).
+        # Other wrappers would apply a second AllReduce under TEP.
+        kimi_situ = p.activation_type == ActivationType.SiTu
+        if d.parallel_size > 1 and not d.use_dp and not (is_minimax_swiglu_bias or kimi_situ):
             return _reject(
                 MoERejectReason.TOPOLOGY_UNSUPPORTED,
                 "MegaMoECuteDsl supports TEP only for bias-free MiniMax-style "
-                "SwigluBias; other model compositions would reduce its already-global "
-                "routed output twice.",
+                "SwigluBias and Kimi SiTU; other model compositions would reduce "
+                "its already-global routed output twice.",
             )
         # ADP wider than EP would need an outer allgather + reducescatter
         # wrapper that this backend does not have.

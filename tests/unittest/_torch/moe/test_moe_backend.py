@@ -1564,7 +1564,24 @@ def test_megamoe_cutedsl_tep_requires_minimax_m3_activation() -> None:
         deployment,
     )
 
+    situ_verdict = MegaMoECuteDsl.can_implement(
+        MoEProblem(
+            quant=QuantAlgo.NVFP4.value,
+            dtype_act=torch.bfloat16,
+            hidden_size=512,
+            intermediate_size=512,
+            num_experts=8,
+            top_k=2,
+            swiglu_gptoss_style=False,
+            bias=False,
+            activation=ActivationType.SiTu.name,
+            activation_constants=frozenset({"alpha", "beta"}),
+        ),
+        deployment,
+    )
+
     assert minimax_verdict.eligible, minimax_verdict.detail
+    assert situ_verdict.eligible, situ_verdict.detail
     assert not plain_swiglu_verdict.eligible
     assert plain_swiglu_verdict.reject_reason is MoERejectReason.TOPOLOGY_UNSUPPORTED
 

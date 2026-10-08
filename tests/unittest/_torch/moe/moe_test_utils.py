@@ -1044,10 +1044,11 @@ def should_skip_megamoe_cutedsl(
     rather than the host ``Communication.dispatch`` strategies, so the
     only sanctioned ``comm_method`` value here is the explicit
     ``IGNORE`` sentinel used by the EPLB / dedicated MegaMoE multi-GPU
-    test paths. ``DEP`` is accepted generally, while ``TEP`` is limited to
-    the bias-free MiniMax-style SwiGLU package whose model wrapper handles the
-    kernel's already-global routed output. TP modes shard intermediate, which
-    would break the per-slot weight layout.
+    test paths.     ``DEP`` is accepted generally, while ``TEP`` in this SwiGLU matrix is limited
+    to the bias-free MiniMax-style package whose model wrapper handles the
+    kernel's already-global routed output. ``can_implement`` also admits Kimi
+    SiTU under TEP; this helper never sees that activation. TP modes shard
+    intermediate, which would break the per-slot weight layout.
     """
     if backend_type != MoeBackendType.MEGAMOE_CUTEDSL:
         return None
