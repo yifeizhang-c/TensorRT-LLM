@@ -2161,6 +2161,40 @@ def _deepseekv4_pro_agg_llm_kwargs(**overrides):
     return kwargs
 
 
+def _deepseekv4_pro_nvfp4_dynamo_llm_kwargs(**overrides):
+    """TensorRT-LLM translation of the Dynamo B200 aggregated V4-Pro recipe.
+
+    Source recipe is dynamo.vllm on nvidia/DeepSeek-V4-Pro-NVFP4: TP8+EP,
+    FLASHINFER_TRTLLM MoE, FP8 KV with block size 256, prefix caching, chunked
+    prefill, FP4 indexer cache, and MTP-2. Memory fraction and context length
+    stay below the vLLM 0.93 / 1M serving target so engine init has room for
+    CUDA graphs.
+    """
+    kwargs = dict(
+        tensor_parallel_size=8,
+        moe_expert_parallel_size=8,
+        moe_config=MoeConfig(backend="TRTLLM",
+                             use_low_precision_moe_combine=True),
+        enable_attention_dp=True,
+        enable_lm_head_tp_in_adp=True,
+        attention_dp_config=AttentionDpConfig(enable_balance=True),
+        custom_tokenizer="deepseek_v4",
+        enable_chunked_prefill=True,
+        max_seq_len=4096,
+        max_batch_size=16,
+        max_num_tokens=8192,
+        kv_cache_config=KvCacheConfig(dtype="fp8",
+                                      tokens_per_block=256,
+                                      enable_block_reuse=True,
+                                      free_gpu_memory_fraction=0.6),
+        cuda_graph_config=CudaGraphConfig(batch_sizes=[1, 2, 4, 8, 16],
+                                          enable_padding=True),
+        speculative_config=MTPDecodingConfig(max_draft_len=2),
+    )
+    kwargs.update(overrides)
+    return kwargs
+
+
 def _run_deepseekv4_eplb(model_name,
                          model_path,
                          moe_backend,
@@ -2390,6 +2424,47 @@ class TestDeepSeekV4Pro(LlmapiAccuracyTestHarness):
     @pytest.mark.skip_less_mpi_world_size(8)
     def test_gsm8k_full_accuracy(self):
         with LLM(self.MODEL_PATH, **_deepseekv4_pro_agg_llm_kwargs()) as llm:
+            task = GSM8K(self.MODEL_NAME)
+            acc_params = task.get_hypothesis_testing_params(
+                dtype=llm.args.dtype,
+                quant_algo=llm.args.quant_config.quant_algo,
+                kv_cache_quant_algo=llm.args.quant_config.kv_cache_quant_algo,
+                spec_dec_algo=llm.args.speculative_config.decoding_type)
+            assert acc_params.num_samples == GSM8K.NUM_SAMPLES
+            with mock.patch.dict(os.environ, {"INTEGRATION_TEST": "0"}):
+                task.evaluate(
+                    llm, extra_evaluator_kwargs=self.EXTRA_EVALUATOR_KWARGS)
+
+
+@pytest.mark.timeout(14400)
+@pytest.mark.skip_less_mpi_world_size(8)
+@pytest.mark.skip_less_device_memory(140000)
+@skip_pre_blackwell
+class TestDeepSeekV4ProNVFP4(LlmapiAccuracyTestHarness):
+    MODEL_NAME = "nvidia/DeepSeek-V4-Pro-NVFP4"
+    MODEL_PATH = f"{llm_models_root()}/DeepSeek-V4-Pro-NVFP4"
+    EXTRA_EVALUATOR_KWARGS = dict(
+        apply_chat_template=True,
+        system_prompt=_DEEPSEEK_V4_GSM8K_SYSTEM_PROMPT,
+    )
+
+    def test_dynamo_b200_smoke(self):
+        with LLM(self.MODEL_PATH,
+                 **_deepseekv4_pro_nvfp4_dynamo_llm_kwargs()) as llm:
+            assert (llm.args.quant_config.quant_algo ==
+                    QuantAlgo.MIXED_PRECISION)
+            assert (llm.args.quant_config.kv_cache_quant_algo == QuantAlgo.FP8)
+            assert llm.args.speculative_config.max_draft_len == 2
+            outputs = llm.generate(
+                ["The capital of France is"],
+                SamplingParams(max_tokens=8, temperature=0),
+            )
+            assert outputs[0].outputs[0].token_ids
+
+    @pytest.mark.skip_less_mpi_world_size(8)
+    def test_gsm8k_full_accuracy(self):
+        with LLM(self.MODEL_PATH,
+                 **_deepseekv4_pro_nvfp4_dynamo_llm_kwargs()) as llm:
             task = GSM8K(self.MODEL_NAME)
             acc_params = task.get_hypothesis_testing_params(
                 dtype=llm.args.dtype,
