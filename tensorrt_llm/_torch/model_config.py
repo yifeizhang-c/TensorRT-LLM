@@ -69,6 +69,9 @@ _LINUX_EBADHANDLE = 521
 
 _DEEPSEEK_V4_ARCHITECTURES = {"DeepseekV4ForCausalLM"}
 _DEEPSEEK_V4_ROUTED_EXPERT_WEIGHT = "layers.0.ffn.experts.0.w1.weight"
+# nvidia/DeepSeek-V4-Pro-NVFP4 requantizes the backbone experts to NVFP4 and
+# leaves the MTP experts in the Instruct MXFP4 layout.
+_DEEPSEEK_V4_MTP_ROUTED_EXPERT_WEIGHT = "mtp.0.ffn.experts.0.w1.weight"
 
 _KIMI_K3_ARCHITECTURES = {
     "KimiK3ForConditionalGeneration",
@@ -804,9 +807,11 @@ class ModelConfig(Generic[TConfig]):
 
     @staticmethod
     def _detect_deepseek_v4_routed_moe_layout(
-            checkpoint_dir: str) -> Optional[str]:
+            checkpoint_dir: str,
+            tensor_name: str = _DEEPSEEK_V4_ROUTED_EXPERT_WEIGHT
+    ) -> Optional[str]:
         tensor_info = ModelConfig._get_safetensors_header_for_tensor(
-            checkpoint_dir, _DEEPSEEK_V4_ROUTED_EXPERT_WEIGHT)
+            checkpoint_dir, tensor_name)
         if tensor_info is None:
             return None
 
@@ -817,6 +822,23 @@ class ModelConfig(Generic[TConfig]):
         if dtype == "U8":
             return "nvfp4"
         return None
+
+    @staticmethod
+    def _deepseek_v4_experts_quant_config(layout: str,
+                                          moe_backend: str) -> QuantConfig:
+        experts_quant_config = QuantConfig()
+        if layout == "mxfp4":
+            experts_quant_config.quant_algo = ModelConfig.get_mxfp4_quant_algo(
+                moe_backend)
+            experts_quant_config.group_size = 32
+        else:
+            experts_quant_config.quant_algo = QuantAlgo.NVFP4
+            experts_quant_config.group_size = 16
+        experts_quant_config.exclude_modules = [
+            'block.*.attn.out', 'block.*.mlp.gate', 'block.*.attn.qkv',
+            'embedding', 'unembedding'
+        ]
+        return experts_quant_config
 
     @staticmethod
     def _is_deepseek_v4_base_checkpoint(checkpoint_dir: str) -> bool:
@@ -857,37 +879,48 @@ class ModelConfig(Generic[TConfig]):
                     "for MXFP4 or U8 for NVFP4.")
             return layer_quant_config
 
-        experts_quant_config = QuantConfig()
-        if layout == "mxfp4":
-            experts_quant_config.quant_algo = ModelConfig.get_mxfp4_quant_algo(
-                moe_backend)
-            experts_quant_config.group_size = 32
-        else:
-            experts_quant_config.quant_algo = QuantAlgo.NVFP4
-            experts_quant_config.group_size = 16
-        experts_quant_config.exclude_modules = [
-            'block.*.attn.out', 'block.*.mlp.gate', 'block.*.attn.qkv',
-            'embedding', 'unembedding'
-        ]
+        experts_quant_config = ModelConfig._deepseek_v4_experts_quant_config(
+            layout, moe_backend)
+        # The NVFP4 checkpoint keeps MTP experts in the Instruct MXFP4
+        # layout (int8 packed weights, E8M0 scales, group 32). Applying the
+        # backbone NVFP4 config there allocates group-16 scale buffers
+        # (hidden/16) and the group-32 scales (hidden/32) fail to copy.
+        mtp_layout = ModelConfig._detect_deepseek_v4_routed_moe_layout(
+            checkpoint_dir, _DEEPSEEK_V4_MTP_ROUTED_EXPERT_WEIGHT)
+        if mtp_layout not in ("mxfp4", "nvfp4"):
+            mtp_layout = layout
+        mtp_quant_config = (
+            experts_quant_config if mtp_layout == layout else
+            ModelConfig._deepseek_v4_experts_quant_config(mtp_layout,
+                                                          moe_backend))
 
         if layer_quant_config is None:
             layer_quant_config = {}
         else:
             layer_quant_config = dict(layer_quant_config)
 
-        num_moe_layers = pretrained_config.num_hidden_layers
+        num_hidden_layers = pretrained_config.num_hidden_layers
+        num_moe_layers = num_hidden_layers
         if (spec_config is not None
                 and spec_config.spec_dec_mode.is_mtp_one_model()):
             num_moe_layers += spec_config.num_nextn_predict_layers
 
-        for layer_idx in range(num_moe_layers):
+        for layer_idx in range(num_hidden_layers):
             layer_quant_config[
                 f"model.layers.{layer_idx}.mlp.experts"] = experts_quant_config
+        for layer_idx in range(num_hidden_layers, num_moe_layers):
+            layer_quant_config[
+                f"model.layers.{layer_idx}.mlp.experts"] = mtp_quant_config
 
         logger.info(
             "Detected DeepSeek-V4 routed MoE %s checkpoint layout; using "
             "%s for routed experts.", layout.upper(),
             experts_quant_config.quant_algo)
+        if mtp_layout != layout and num_moe_layers > num_hidden_layers:
+            logger.info(
+                "Detected DeepSeek-V4 MTP routed MoE %s layout; using %s "
+                "for MTP experts.", mtp_layout.upper(),
+                mtp_quant_config.quant_algo)
         return layer_quant_config
 
     @staticmethod

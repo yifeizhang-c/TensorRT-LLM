@@ -678,6 +678,58 @@ def test_deepseek_v4_routed_moe_quant_config_covers_mtp_layers(tmp_path, monkeyp
         assert layer_quant_config[f"model.layers.{layer_idx}.mlp.experts"].quant_algo == quant_algo
 
 
+def test_deepseek_v4_nvfp4_backbone_keeps_mxfp4_mtp_experts(tmp_path, monkeypatch):
+    """NVFP4 Pro stores MXFP4 MTP experts; those layers must not use group 16."""
+    monkeypatch.setattr("tensorrt_llm._torch.model_config.get_sm_version", lambda: 100)
+    shard_name = "model-00001-of-00001.safetensors"
+    header = {
+        "layers.0.ffn.experts.0.w1.weight": {
+            "dtype": "U8",
+            "shape": [3072, 3584],
+            "data_offsets": [0, 0],
+        },
+        "mtp.0.ffn.experts.0.w1.weight": {
+            "dtype": "I8",
+            "shape": [3072, 3584],
+            "data_offsets": [0, 0],
+        },
+    }
+    payload = json.dumps(header).encode("utf-8")
+    (tmp_path / shard_name).write_bytes(struct.pack("<Q", len(payload)) + payload)
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "weight_map": {
+                    name: shard_name
+                    for name in header
+                }
+            }
+        )
+    )
+
+    class MTPMode:
+        @staticmethod
+        def is_mtp_one_model():
+            return True
+
+    class MTPConfig:
+        spec_dec_mode = MTPMode()
+        num_nextn_predict_layers = 2
+
+    layer_quant_config = ModelConfig._set_deepseek_v4_routed_moe_quant_config(
+        DeepseekV4Config(num_hidden_layers=2), str(tmp_path), "TRTLLM", None, MTPConfig()
+    )
+
+    for layer_idx in range(2):
+        quant_config = layer_quant_config[f"model.layers.{layer_idx}.mlp.experts"]
+        assert quant_config.quant_algo == QuantAlgo.NVFP4
+        assert quant_config.group_size == 16
+    for layer_idx in range(2, 4):
+        quant_config = layer_quant_config[f"model.layers.{layer_idx}.mlp.experts"]
+        assert quant_config.quant_algo == QuantAlgo.W4A8_MXFP4_MXFP8
+        assert quant_config.group_size == 32
+
+
 def test_deepseek_v4_mtp_projection_uses_fp8_quant_config(monkeypatch):
     def fake_decoder_layer_init(self, model_config, *_args, **_kwargs):
         torch.nn.Module.__init__(self)
