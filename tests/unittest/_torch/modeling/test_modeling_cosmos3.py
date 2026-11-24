@@ -21,7 +21,7 @@ from tensorrt_llm.inputs import media_io
 from tensorrt_llm.models.modeling_utils import QuantConfig
 from tensorrt_llm.quantization.mode import QuantAlgo
 
-COSMOS3_NANO_PATH = os.path.join(llm_models_root(), "nvidia", "Cosmos3-Nano")
+COSMOS3_NANO_PATH = os.path.join(llm_models_root(), "Cosmos3-Nano")
 
 COSMOS3_TEST_CONFIG = copy.deepcopy(QWEN3_VL_8B_CONFIG)
 COSMOS3_TEST_CONFIG.update(
